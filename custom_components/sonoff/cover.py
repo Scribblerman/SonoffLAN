@@ -1,4 +1,8 @@
-from homeassistant.components.cover import CoverDeviceClass, CoverEntity
+from homeassistant.components.cover import (
+    CoverDeviceClass,
+    CoverEntity,
+    CoverEntityFeature,
+)
 
 from .core.const import DOMAIN
 from .core.entity import XEntity
@@ -249,20 +253,52 @@ class XCoverT5(XCover):
 
 # noinspection PyAbstractClass
 class XCover216(XCover):
+    # CoolKit CK-BL602-TC-01 (uiid 216) - VEVOR Schiebetor-Motor.
+    # Nur unterer Endschalter: doorState 0=ganz zu, 1=nicht ganz zu. Kein
+    # zuverlaessiges "ganz offen"- oder Bewegungssignal vom Geraet. Darum nur
+    # closed/open und closing (dessen Ende wir aus doorState=0 kennen); kein
+    # "opening". Lokaler Patch gegen Upstream-Regress (haengt sonst auf closing).
     params = {"switch", "doorState"}
+    event = True  # initiales set_state ueberspringen; im __init__ aus params seeden
     _attr_device_class = CoverDeviceClass.GATE
+    _attr_supported_features = (
+        CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
+    )
     _attr_is_closed = None
+    _attr_assumed_state = True
+
+    def __init__(self, ewelink: XRegistry, device: dict):
+        super().__init__(ewelink, device)
+        ds = device["params"].get("doorState")
+        if ds is not None:
+            self._attr_is_closed = ds == 0
 
     def set_state(self, params: dict):
-        # => command to cover from mobile app (ignore initial state)
-        if len(params) == 1 and "switch" in params:
-            # device receive command - on=open/off=close/pause=stop
-            self._attr_is_opening = params["switch"] == "on"
-            self._attr_is_closing = params["switch"] == "off"
+        # Nur einzelne doorState-Pushes sind echte Endschalter-Uebergaenge.
+        # Command-Echos und Full-Dumps enthalten doorState mit Pre-Command-Werten.
+        if "doorState" not in params or "switch" in params:
+            return
+        state = params["doorState"]
+        self._attr_is_closed = state == 0
+        if state == 0:
+            self._attr_is_closing = False
 
-        if "doorState" in params:
-            self._attr_is_closing = self._attr_is_opening = False
-            self._attr_is_closed = params["doorState"] == 0
+    async def async_open_cover(self, **kwargs):
+        self._attr_is_closing = False
+        self._attr_is_closed = False
+        self._async_write_ha_state()
+        await self.ewelink.send(self.device, {"switch": "on"}, query_cloud=False)
+
+    async def async_close_cover(self, **kwargs):
+        self._attr_is_closing = True
+        self._async_write_ha_state()
+        await self.ewelink.send(self.device, {"switch": "off"}, query_cloud=False)
+
+    async def async_stop_cover(self, **kwargs):
+        self._attr_is_closing = False
+        self._async_write_ha_state()
+        await self.ewelink.send(self.device, {"switch": "pause"}, query_cloud=False)
 
     async def async_set_cover_position(self, position: int, **kwargs):
-        return  # Device has no position control — no-op.
+        # Geraet hat keine Positionssteuerung - no-op.
+        return
